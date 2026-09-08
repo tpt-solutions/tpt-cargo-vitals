@@ -1,0 +1,85 @@
+Design Spec 2 (Replacement): tpt-cargo-vitals (Supply-Chain & Dependency Auditor)
+Status: Proposed
+Target Release: Q4 2026
+Primary Language: Rust
+License: Strict MIT
+1. Executive Summary
+tpt-cargo-vitals is a high-performance, local-first CLI tool for auditing, visualizing, and securing Rust dependency trees. It acts as a "vitals check" for any Rust project, instantly identifying vulnerable crates, license violations (enforcing your pure-MIT rule), and dependency bloat, without sending any metadata to external SaaS platforms.
+2. Problem Statement
+AI agents (and human developers) frequently add dependencies to Cargo.toml without fully understanding the transitive tree. This leads to:
+Security Risks: Pulling in crates with known CVEs or compromised maintainers.
+License Contamination: Accidentally introducing GPL or strict Apache-2.0 crates into a project that requires pure MIT.
+Compile-Time Bloat: Unnecessary transitive dependencies that slow down CI/CD and increase binary size.
+Existing tools (cargo-audit, cargo-tree) are either too slow, require network calls to RustSec, or lack a cohesive, actionable "vitals" dashboard.
+3. Goals & Non-Goals
+Goals:
+Parse Cargo.toml and Cargo.lock in < 100ms.
+Provide a local, cached CVE database (updated via a simple tpt-cargo-vitals update command) so audits can run air-gapped.
+Enforce custom license policies (e.g., --allow-list MIT).
+Visualize the dependency tree with a focus on bloat (e.g., highlighting crates that pull in 50+ transitive deps).
+Non-Goals:
+Auto-fixing or auto-updating dependencies (that’s cargo upgrade’s job; this tool is for auditing).
+Supporting languages other than Rust (keep it hyper-focused and fast).
+4. Architecture & Pure-MIT Tech Stack
+The tool is designed to be a zero-telemetry, single-binary CLI.
+Parsing: cargo_metadata (MIT) to read the dependency graph.
+Graph Analysis: guppy (MIT/Apache -> configured to MIT) for fast, accurate dependency graph traversal and cycle detection.
+Concurrency: rayon (MIT) to parallelize the scanning of the dependency tree against the local CVE database.
+UI/Output: owo-colors (MIT) and comfy-table (MIT) for a clean, accessible terminal dashboard.
+
+[ Cargo.toml / Cargo.lock ]
+       │
+       ▼
+┌──────────────────────────────────────┐
+│      1. Graph Builder                │
+│  (cargo_metadata + guppy)            │
+└──────────────────┬───────────────────┘
+                   │
+                   ▼
+┌──────────────────────────────────────┐
+│      2. Parallel Audit Engine        │
+│  (Rayon threads check each crate):   │
+│   - Local CVE DB match               │
+│   - License compliance check         │
+│   - Transitive depth/bloat score     │
+└──────────────────┬───────────────────┘
+                   │
+                   ▼
+┌──────────────────────────────────────┐
+│      3. TUI Dashboard / CI Output    │
+│  (Color-coded pass/fail, actionable  │
+│   remediation steps)                 │
+└──────────────────────────────────────┘
+
+5. Key Features & CLI UX
+Feature 1: The "Vitals" Dashboard
+Running tpt-cargo-vitals check outputs a concise, color-coded health report:
+
+✅ tpt-mcpbox v0.1.0
+├─ 🛡️ Security: 0 vulnerabilities found (Local DB: 2026-09-08)
+├─ ⚖️ Licenses: 100% compliant (42 MIT, 0 Apache, 0 GPL)
+└─ 📦 Bloat: Low (Max transitive depth: 4, Total crates: 45)
+
+⚠️ Warning: tpt-strata-core pulls in `serde` with the "derive" feature, 
+           which is unused. Consider removing it to save 1.2s compile time.
+
+Feature 2: Strict License Enforcement (The "Pure MIT" Enforcer)
+
+# Fail CI if any non-MIT license is detected in the tree
+tpt-cargo-vitals check --enforce-license MIT --ci-mode
+
+Feature 3: Local-First CVE Interceptor
+Instead of hitting api.github.com or rustsec.org on every run, it uses a local SQLite database.
+tpt-cargo-vitals update  # Fetches latest RustSec advisory DB to ~/.tpt/vitals/cve.db
+tpt-cargo-vitals check   # Runs entirely offline against the local DB
+
+Feature 4: The "Why is this here?" Command
+When a bloated or suspicious crate is found, developers need to know why it's there.
+
+tpt-cargo-vitals why tokio
+# Output: "tokio v1.32.0 is required by: tpt-mcpbox -> wasmtime -> tokio"
+
+6. Why this fits your ecosystem perfectly
+Synergy with tpt-mcpbox: tpt-mcpbox secures the runtime execution of AI agents. tpt-cargo-vitals secures the build-time supply chain of the code those agents (or humans) write. Together, they form a complete security story.
+Synergy with tpt-telos: As your agentic compiler generates Rust/Go code, you can hook tpt-cargo-vitals into the compiler’s output pipeline to guarantee the generated FFI bridges don’t introduce license or security violations.
+100% Pure MIT: By carefully selecting guppy (MIT mode), cargo_metadata, and rayon, you can guarantee this tool itself adheres to your strict licensing philosophy.
