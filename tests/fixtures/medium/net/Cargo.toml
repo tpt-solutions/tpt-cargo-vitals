@@ -1,0 +1,9 @@
+[package]
+name = "medium-net"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+medium-util = { path = "../util" }
+medium-proto = { path = "../proto" }

@@ -1,0 +1,15 @@
+[package]
+name = "platform-app"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+platform-core = { path = "../core" }
+
+# Each of these is only resolved on its own platform.
+[target.'cfg(unix)'.dependencies]
+platform-unix = { path = "../unix" }
+
+[target.'cfg(windows)'.dependencies]
+platform-win = { path = "../win" }

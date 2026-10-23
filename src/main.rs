@@ -3,6 +3,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+mod graph;
+
 /// Audit, visualize, and secure Rust dependency trees.
 #[derive(Parser)]
 #[command(name = "tpt-cargo-vitals", version, about, long_about = None)]
@@ -40,9 +42,26 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Check { path, ci_mode } => {
-            let _ = (path, ci_mode);
-            eprintln!("check: not implemented yet (Phase 5)");
+        // The dashboard is Phase 5; for now `check` loads the graph and reports
+        // its shape and any dependency cycles.
+        Command::Check { path, .. } => {
+            let graph = match graph::DependencyGraph::load(&path) {
+                Ok(graph) => graph,
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            println!(
+                "{} packages, {} dependency links, {} workspace member(s)",
+                graph.package_count(),
+                graph.link_count(),
+                graph.workspace_members().len(),
+            );
+            for cycle in graph.cycles() {
+                eprintln!("warning: dependency cycle: {}", cycle.join(" -> "));
+            }
         }
         Command::Update => {
             eprintln!("update: not implemented yet (Phase 2)");

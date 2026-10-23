@@ -1,0 +1,14 @@
+[package]
+name = "medium-app"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+medium-core = { path = "../core" }
+medium-net = { path = "../net" }
+medium-util = { path = "../util" }
+
+# Dev-only edge that closes a cycle: x depends back on app.
+[dev-dependencies]
+medium-x = { path = "../x" }

@@ -1,0 +1,9 @@
+[package]
+name = "large-23"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+large-33 = { path = "../33" }
+large-28 = { path = "../28" }
