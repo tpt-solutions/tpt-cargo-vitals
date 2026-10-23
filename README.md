@@ -45,7 +45,8 @@ cargo build --release
 ## Usage
 
 ```sh
-# Refresh the local RustSec advisory cache (the only command that uses the network)
+# Refresh the local RustSec advisory cache (the only command that uses the network;
+# it runs the system `curl`, so curl must be on PATH)
 tpt-cargo-vitals update
 
 # Combined health dashboard, fully offline

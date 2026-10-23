@@ -1,19 +1,21 @@
-//! Dependency graph construction, built on `cargo_metadata`.
+//! Dependency graph construction, built on `cargo metadata`.
 //!
-//! `cargo metadata` does the resolution. We turn its resolve output into a plain
-//! adjacency list so the audit passes can traverse it without re-running Cargo.
+//! `cargo metadata` does the resolution. We parse its JSON output and turn the
+//! resolve section into a plain adjacency list so the audit passes can traverse
+//! it without re-running Cargo.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::Path;
+use std::process::Command;
 
-use cargo_metadata::{CargoOpt, Metadata, MetadataCommand, PackageId};
+use json::JsonValue;
 
 /// Why a graph could not be built.
 #[derive(Debug)]
 pub enum GraphError {
-    /// `cargo metadata` failed or its output could not be parsed.
-    Metadata(cargo_metadata::Error),
+    /// `cargo metadata` failed, or its output was not the JSON we expected.
+    Metadata(String),
     /// The metadata has no resolve section, so there are no dependency edges.
     NoResolve,
 }
@@ -21,7 +23,7 @@ pub enum GraphError {
 impl fmt::Display for GraphError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Metadata(err) => write!(f, "cargo metadata failed: {err}"),
+            Self::Metadata(message) => write!(f, "cargo metadata failed: {message}"),
             Self::NoResolve => write!(f, "cargo metadata returned no dependency resolution"),
         }
     }
@@ -79,11 +81,19 @@ impl DependencyGraph {
     pub fn load(project_dir: &Path) -> Result<Self, GraphError> {
         let manifest = project_dir.join("Cargo.toml");
 
-        // Host first (no filter), then each fixed target.
-        let mut metadatas = vec![metadata_for(&manifest, None)?];
-        for target in TARGETS {
-            metadatas.push(metadata_for(&manifest, Some(target))?);
+        // One run per target. An unfiltered `cargo metadata` resolves every target at
+        // once and lists optional dependencies that no real build enables, so it
+        // over-reports. The host is included even when it is not in TARGETS.
+        let mut targets: Vec<String> = TARGETS.iter().map(|target| (*target).to_owned()).collect();
+        let host = host_triple()?;
+        if !targets.contains(&host) {
+            targets.push(host);
         }
+
+        let metadatas = targets
+            .iter()
+            .map(|target| metadata_for(&manifest, target))
+            .collect::<Result<Vec<_>, _>>()?;
         Self::from_metadatas(&metadatas)
     }
 
@@ -93,47 +103,52 @@ impl DependencyGraph {
     /// time the parse + build step without the `cargo metadata` subprocess.
     #[cfg(test)]
     pub fn from_json(json: &str) -> Result<Self, GraphError> {
-        let metadata = MetadataCommand::parse(json).map_err(GraphError::Metadata)?;
+        let metadata = parse_metadata(json)?;
         Self::from_metadatas(std::slice::from_ref(&metadata))
     }
 
     /// Merges the resolve output of several target-filtered runs into one graph.
-    /// Packages are identified by `PackageId`, so a package seen on two targets
+    /// Packages are identified by their `id`, so a package seen on two targets
     /// appears once, and its edges are the union across targets.
-    fn from_metadatas(metadatas: &[Metadata]) -> Result<Self, GraphError> {
+    fn from_metadatas(metadatas: &[JsonValue]) -> Result<Self, GraphError> {
         // Workspace membership is the same for every target, so read it from the first.
         let first = metadatas.first().ok_or(GraphError::NoResolve)?;
-        let workspace_ids: HashSet<&PackageId> = first.workspace_members.iter().collect();
+        let workspace_ids: HashSet<&str> =
+            text_list(first, "workspace_members")?.into_iter().collect();
 
         let mut graph = Self {
             packages: Vec::new(),
             edges: Vec::new(),
             workspace: Vec::new(),
         };
-        let mut index: HashMap<PackageId, usize> = HashMap::new();
+        let mut index: HashMap<&str, usize> = HashMap::new();
 
         for metadata in metadatas {
-            let resolve = metadata.resolve.as_ref().ok_or(GraphError::NoResolve)?;
+            let resolve = &metadata["resolve"];
+            if resolve.is_null() {
+                return Err(GraphError::NoResolve);
+            }
 
-            for pkg in &metadata.packages {
-                if !index.contains_key(&pkg.id) {
-                    index.insert(pkg.id.clone(), graph.packages.len());
+            for pkg in metadata["packages"].members() {
+                let id = text(pkg, "id")?;
+                if !index.contains_key(id) {
+                    index.insert(id, graph.packages.len());
                     graph.packages.push(Package {
-                        name: pkg.name.to_string(),
-                        version: pkg.version.to_string(),
-                        license: pkg.license.clone(),
-                        workspace: workspace_ids.contains(&pkg.id),
+                        name: text(pkg, "name")?.to_owned(),
+                        version: text(pkg, "version")?.to_owned(),
+                        license: pkg["license"].as_str().map(str::to_owned),
+                        workspace: workspace_ids.contains(id),
                     });
                     graph.edges.push(Vec::new());
                 }
             }
 
-            for node in &resolve.nodes {
-                let from = index[&node.id];
-                for dep in &node.deps {
+            for node in resolve["nodes"].members() {
+                let from = lookup(&index, text(node, "id")?)?;
+                for dep in node["deps"].members() {
                     // A package can reach the same dependency under several names
                     // (renames, or normal + dev); keep one edge per pair.
-                    let to = index[&dep.pkg];
+                    let to = lookup(&index, text(dep, "pkg")?)?;
                     if !graph.edges[from].contains(&to) {
                         graph.edges[from].push(to);
                     }
@@ -192,16 +207,73 @@ impl DependencyGraph {
     }
 }
 
-/// Runs `cargo metadata` for one target, or for the host when `target` is `None`.
-fn metadata_for(manifest: &Path, target: Option<&str>) -> Result<Metadata, GraphError> {
-    let mut command = MetadataCommand::new();
+/// The host target triple, as reported by `rustc -vV`.
+fn host_triple() -> Result<String, GraphError> {
+    let output = Command::new("rustc")
+        .arg("-vV")
+        .output()
+        .map_err(|err| GraphError::Metadata(format!("could not run rustc: {err}")))?;
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .map(str::to_owned)
+        .ok_or_else(|| GraphError::Metadata("rustc -vV reported no host triple".to_owned()))
+}
+
+/// Runs `cargo metadata` filtered to one target triple.
+fn metadata_for(manifest: &Path, target: &str) -> Result<JsonValue, GraphError> {
+    let mut command = Command::new("cargo");
     command
-        .manifest_path(manifest)
-        .features(CargoOpt::AllFeatures);
-    if let Some(target) = target {
-        command.other_options(["--filter-platform".to_owned(), target.to_owned()]);
+        .args([
+            "metadata",
+            "--format-version",
+            "1",
+            "--all-features",
+            "--manifest-path",
+        ])
+        .arg(manifest)
+        .args(["--filter-platform", target]);
+
+    let output = command
+        .output()
+        .map_err(|err| GraphError::Metadata(format!("could not run cargo: {err}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(GraphError::Metadata(stderr.trim().to_owned()));
     }
-    command.exec().map_err(GraphError::Metadata)
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|err| GraphError::Metadata(format!("cargo output is not UTF-8: {err}")))?;
+    parse_metadata(&stdout)
+}
+
+fn parse_metadata(json: &str) -> Result<JsonValue, GraphError> {
+    json::parse(json).map_err(|err| GraphError::Metadata(format!("invalid JSON: {err}")))
+}
+
+/// A string field of a JSON object, or an error naming the missing field.
+fn text<'a>(value: &'a JsonValue, key: &str) -> Result<&'a str, GraphError> {
+    value[key]
+        .as_str()
+        .ok_or_else(|| GraphError::Metadata(format!("missing string field `{key}`")))
+}
+
+/// An array of string fields. A missing array is treated as empty.
+fn text_list<'a>(value: &'a JsonValue, key: &str) -> Result<Vec<&'a str>, GraphError> {
+    value[key]
+        .members()
+        .map(|item| {
+            item.as_str()
+                .ok_or_else(|| GraphError::Metadata(format!("`{key}` entry is not a string")))
+        })
+        .collect()
+}
+
+/// Index of a package id, or an error if the resolve section names an unknown package.
+fn lookup(index: &HashMap<&str, usize>, id: &str) -> Result<usize, GraphError> {
+    index
+        .get(id)
+        .copied()
+        .ok_or_else(|| GraphError::Metadata(format!("resolve refers to unknown package `{id}`")))
 }
 
 /// Strongly connected components with more than one member, via Tarjan's algorithm.

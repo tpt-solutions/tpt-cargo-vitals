@@ -3,8 +3,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use clap::{Parser, Subcommand};
+use clap::{Arg, ArgAction, Command, value_parser};
 
+mod advisory;
 mod audit;
 mod cache;
 mod graph;
@@ -14,51 +15,78 @@ mod update;
 use cache::{AdvisoryCache, Error, format_date};
 use graph::DependencyGraph;
 
-/// Audit, visualize, and secure Rust dependency trees.
-#[derive(Parser)]
-#[command(name = "tpt-cargo-vitals", version, about, long_about = None)]
-struct Cli {
-    /// Advisory cache file. Defaults to ~/.tpt/vitals/cve.db.
-    #[arg(long, global = true, value_name = "PATH")]
-    db: Option<PathBuf>,
-
-    #[command(subcommand)]
-    command: Command,
+/// The command-line interface. Built with clap's builder API rather than its derive
+/// macros, which would pull in `unicode-ident` (Unicode-3.0) and break the pure-MIT policy.
+fn cli() -> Command {
+    Command::new("tpt-cargo-vitals")
+        .version(env!("CARGO_PKG_VERSION"))
+        .about("Audit, visualize, and secure Rust dependency trees.")
+        .arg_required_else_help(true)
+        .subcommand_required(true)
+        .arg(
+            Arg::new("db")
+                .long("db")
+                .global(true)
+                .value_name("PATH")
+                .value_parser(value_parser!(PathBuf))
+                .help("Advisory cache file. Defaults to ~/.tpt/vitals/cve.db."),
+        )
+        .subcommand(
+            Command::new("check")
+                .about("Print the combined health dashboard for a project.")
+                .arg(path_arg())
+                .arg(
+                    Arg::new("enforce-license")
+                        .long("enforce-license")
+                        .alias("allow-list")
+                        .value_name("LIST")
+                        .value_delimiter(',')
+                        .help(
+                            "Allowed SPDX license identifiers, comma-separated (e.g. `MIT`). \
+                             Any dependency whose license cannot be satisfied with these is a violation.",
+                        ),
+                )
+                .arg(
+                    Arg::new("ci-mode")
+                        .long("ci-mode")
+                        .action(ArgAction::SetTrue)
+                        .help(
+                            "Exit non-zero on license violations or vulnerabilities, and print a \
+                             tab-separated summary of each finding to stdout.",
+                        ),
+                )
+                .arg(
+                    Arg::new("max-db-age-days")
+                        .long("max-db-age-days")
+                        .value_name("DAYS")
+                        .value_parser(value_parser!(u32))
+                        .default_value("30")
+                        .help("Warn when the advisory cache is older than this many days."),
+                ),
+        )
+        .subcommand(
+            Command::new("update").about("Fetch and refresh the local RustSec advisory cache."),
+        )
+        .subcommand(
+            Command::new("why")
+                .about("Show the dependency path(s) that pull in a crate.")
+                .arg(
+                    Arg::new("crate")
+                        .required(true)
+                        .help("Name of the crate to explain."),
+                )
+                .arg(path_arg()),
+        )
 }
 
-#[derive(Subcommand)]
-enum Command {
-    /// Print the combined health dashboard for a project.
-    Check {
-        /// Path to the project's Cargo.toml directory.
-        #[arg(long, default_value = ".")]
-        path: PathBuf,
-
-        /// Allowed SPDX license identifiers, comma-separated (e.g. `MIT`). Any
-        /// dependency whose license cannot be satisfied with these is a violation.
-        #[arg(long, alias = "allow-list", value_name = "LIST", value_delimiter = ',')]
-        enforce_license: Vec<String>,
-
-        /// Exit non-zero on license violations or vulnerabilities, and print a
-        /// tab-separated summary of each finding to stdout.
-        #[arg(long)]
-        ci_mode: bool,
-
-        /// Warn when the advisory cache is older than this many days.
-        #[arg(long, default_value_t = 30, value_name = "DAYS")]
-        max_db_age_days: u32,
-    },
-    /// Fetch and refresh the local RustSec advisory cache.
-    Update,
-    /// Show the dependency path(s) that pull in a crate.
-    Why {
-        /// Name of the crate to explain.
-        crate_name: String,
-
-        /// Path to the project's Cargo.toml directory.
-        #[arg(long, default_value = ".")]
-        path: PathBuf,
-    },
+/// The `--path` option shared by the project-level subcommands.
+fn path_arg() -> Arg {
+    Arg::new("path")
+        .long("path")
+        .value_name("PATH")
+        .value_parser(value_parser!(PathBuf))
+        .default_value(".")
+        .help("Path to the project's Cargo.toml directory.")
 }
 
 fn main() -> ExitCode {
@@ -72,14 +100,14 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<ExitCode, Error> {
-    let cli = Cli::parse();
-    let db_path = match cli.db {
-        Some(path) => path,
+    let matches = cli().get_matches();
+    let db_path = match matches.get_one::<PathBuf>("db") {
+        Some(path) => path.clone(),
         None => default_db_path()?,
     };
 
-    match cli.command {
-        Command::Update => {
+    match matches.subcommand() {
+        Some(("update", _)) => {
             let mut cache = AdvisoryCache::open(&db_path)?;
             let now = unix_now();
             let count = update::fetch(&mut cache, update::ADVISORY_DB_URL, now)?;
@@ -92,12 +120,17 @@ fn run() -> Result<ExitCode, Error> {
 
         // The dashboard is Phase 5. For now `check` reports graph shape,
         // dependency cycles, and known vulnerabilities.
-        Command::Check {
-            path,
-            enforce_license,
-            ci_mode,
-            max_db_age_days,
-        } => {
+        Some(("check", args)) => {
+            let path = path_of(args);
+            let enforce_license: Vec<String> = args
+                .get_many::<String>("enforce-license")
+                .map(|values| values.cloned().collect())
+                .unwrap_or_default();
+            let ci_mode = args.get_flag("ci-mode");
+            let max_db_age_days = *args
+                .get_one::<u32>("max-db-age-days")
+                .expect("max-db-age-days has a default");
+
             let graph = DependencyGraph::load(&path)?;
             println!(
                 "{} packages, {} dependency links, {} workspace member(s)",
@@ -174,12 +207,21 @@ fn run() -> Result<ExitCode, Error> {
             })
         }
 
-        Command::Why { crate_name, path } => {
-            let _ = (crate_name, path);
+        Some(("why", args)) => {
+            let _ = (args.get_one::<String>("crate"), path_of(args));
             eprintln!("why: not implemented yet (Phase 4)");
             Ok(ExitCode::SUCCESS)
         }
+
+        _ => unreachable!("clap requires a subcommand"),
     }
+}
+
+/// The `--path` value of a subcommand. It always has a default, so it is never absent.
+fn path_of(args: &clap::ArgMatches) -> PathBuf {
+    args.get_one::<PathBuf>("path")
+        .expect("path has a default")
+        .clone()
 }
 
 fn print_license_summary(report: &license::LicenseReport, policy: &[String]) {

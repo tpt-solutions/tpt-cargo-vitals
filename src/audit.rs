@@ -3,9 +3,9 @@
 use std::collections::HashMap;
 
 use rayon::prelude::*;
-use rustsec::Advisory;
-use rustsec::semver::Version;
+use semver::Version;
 
+use crate::advisory::Advisory;
 use crate::cache::{AdvisoryCache, Error};
 use crate::graph::DependencyGraph;
 
@@ -42,20 +42,20 @@ pub fn find_vulnerabilities(
     let advisories: Vec<Advisory> = cache
         .advisories_for(&names)?
         .par_iter()
-        .filter_map(|raw| match raw.parse::<Advisory>() {
+        .filter_map(|raw| match Advisory::parse(raw) {
             Ok(advisory) => Some(advisory),
             Err(err) => {
                 eprintln!("warning: skipping malformed advisory: {err}");
                 None
             }
         })
-        .filter(|advisory| !advisory.withdrawn())
+        .filter(|advisory| !advisory.withdrawn)
         .collect();
 
     let mut by_package: HashMap<&str, Vec<&Advisory>> = HashMap::new();
     for advisory in &advisories {
         by_package
-            .entry(advisory.metadata.package.as_str())
+            .entry(advisory.package.as_str())
             .or_default()
             .push(advisory);
     }
@@ -71,18 +71,13 @@ pub fn find_vulnerabilities(
                 .flatten()
                 .filter_map(move |advisory| {
                     let version = version.as_ref().ok()?;
-                    advisory.versions.is_vulnerable(version).then(|| Finding {
-                        advisory_id: advisory.id().to_string(),
-                        title: advisory.title().to_owned(),
+                    advisory.is_vulnerable(version).then(|| Finding {
+                        advisory_id: advisory.id.clone(),
+                        title: advisory.title.clone(),
                         package: pkg.name.clone(),
                         version: pkg.version.clone(),
-                        patched: advisory
-                            .versions
-                            .patched()
-                            .iter()
-                            .map(ToString::to_string)
-                            .collect(),
-                        informational: advisory.metadata.informational.is_some(),
+                        patched: advisory.patched_text.clone(),
+                        informational: advisory.informational,
                     })
                 })
         })
@@ -149,7 +144,7 @@ mod tests {
                 title: "Test advisory for vuln-crate".to_owned(),
                 package: "vuln-crate".to_owned(),
                 version: "0.1.0".to_owned(),
-                patched: vec![">=0.2.0".to_owned()],
+                patched: vec![">= 0.2.0".to_owned()],
                 informational: false,
             }]
         );

@@ -21,9 +21,12 @@ and [todo.md](todo.md) before proposing larger changes.
 
 ## Dependency policy
 
-Every new dependency must be **MIT or Apache-2.0**. `cargo deny check` enforces
-this via [deny.toml](deny.toml). Adding a dependency with any other license needs
-an explicit discussion first.
+The dependency tree is **pure MIT**. A new dependency must be MIT-licensed, or
+dual-licensed with an MIT option (such as `MIT OR Apache-2.0`). `cargo deny check`
+enforces this via [deny.toml](deny.toml). Avoid procedural-macro crates such as
+`clap`'s derive feature or `serde_derive`: they pull in `unicode-ident`, which is
+Unicode-3.0 only. Adding a dependency that fails the policy needs an explicit
+discussion first.
 
 ## Code style
 

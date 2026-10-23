@@ -2,9 +2,7 @@
 
 use std::io::Read;
 use std::path::Path;
-
-use ureq::Agent;
-use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
+use std::process::{Command, Stdio};
 
 use crate::cache::{AdvisoryCache, Error};
 
@@ -14,16 +12,25 @@ pub const ADVISORY_DB_URL: &str =
 
 /// Downloads the advisory database from `url` and replaces the cache's contents.
 /// Returns the number of advisories stored.
+///
+/// The download runs through the system `curl`, which uses the OS trust store.
+/// No HTTP or TLS crate is linked, so the dependency tree stays pure MIT.
 pub fn fetch(cache: &mut AdvisoryCache, url: &str, now: i64) -> Result<usize, Error> {
-    // Native TLS uses the OS trust store. This keeps the bundled Mozilla root
-    // certificates (CDLA-Permissive-2.0) out of the dependency tree.
-    let tls = TlsConfig::builder()
-        .provider(TlsProvider::NativeTls)
-        .root_certs(RootCerts::PlatformVerifier)
-        .build();
-    let agent: Agent = Agent::config_builder().tls_config(tls).build().into();
-    let response = agent.get(url).call()?;
-    import(cache, response.into_body().into_reader(), now)
+    let mut child = Command::new("curl")
+        .args(["--fail", "--location", "--silent", "--show-error", url])
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("could not run curl ({err}); install curl to run `update`"))?;
+
+    let stdout = child.stdout.take().expect("stdout was piped");
+    // Reading to the end (or failing) drops the pipe, so curl cannot block on a full buffer.
+    let imported = import(cache, stdout, now);
+    let status = child.wait()?;
+
+    if !status.success() {
+        return Err(format!("curl could not download {url} ({status})").into());
+    }
+    imported
 }
 
 /// Stores the advisories from a gzipped tarball of the advisory-db repository.

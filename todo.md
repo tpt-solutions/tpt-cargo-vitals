@@ -24,9 +24,9 @@ License: dual **MIT OR Apache-2.0** (copyright: TPT Solutions).
       returns 404 for the name (unclaimed at time of check)
 
 ## Phase 1 — Graph Builder (Parsing & Dependency Graph)
-- [x] Add `cargo_metadata` (MIT) dependency; load `Cargo.toml`/`Cargo.lock` for a
-      target project path (`DependencyGraph::load` in `src/graph.rs`, via
-      `cargo_metadata`, which runs `cargo metadata`)
+- [x] Load `Cargo.toml`/`Cargo.lock` for a
+      target project path (`DependencyGraph::load` in `src/graph.rs`, which runs
+      `cargo metadata` and parses its JSON with the MIT-licensed `json` crate)
 - [x] Graph traversal without guppy: guppy was dropped (its `target-lexicon` and
       petgraph's `foldhash` dependency chains were out of policy). Graph is a plain
       adjacency list; cycles come from an iterative Tarjan SCC in `src/graph.rs`.
@@ -47,9 +47,9 @@ License: dual **MIT OR Apache-2.0** (copyright: TPT Solutions).
       they run offline
 
 ## Phase 2 — Local-First CVE Database & Security Audit
-- [x] Add `rustsec` crate to parse RustSec advisory-db format (`rustsec` 0.32,
-      default features off; parses each advisory and matches versions with
-      `Advisory::versions().is_vulnerable`)
+- [x] Parse the RustSec advisory-db format (`src/advisory.rs`, using `toml` and
+      `semver`). Originally the `rustsec` crate; it was replaced for pure MIT, since
+      it pulls in the ICU stack (Unicode-3.0).
 - [x] Implement `tpt-cargo-vitals update`: fetch/refresh advisory-db, cache into
       local SQLite DB at `~/.tpt/vitals/cve.db` (`src/update.rs`, `src/cache.rs`).
       Downloads the GitHub tarball of `rustsec/advisory-db` and streams it into SQLite
@@ -69,7 +69,7 @@ License: dual **MIT OR Apache-2.0** (copyright: TPT Solutions).
       beyond the original list)
 
 ## Phase 3 — License Compliance Engine ("Pure MIT" Enforcer)
-- [x] Extract/normalize SPDX license expressions per crate from `cargo_metadata`
+- [x] Extract/normalize SPDX license expressions per crate from `cargo metadata`
       output (`src/license.rs`: a parser for `AND`, `OR`, `/`, `WITH`, and parentheses;
       `WITH` exceptions are dropped, so only the base license is judged)
 - [x] Implement `--enforce-license <LIST>` / `--allow-list` policy matching
