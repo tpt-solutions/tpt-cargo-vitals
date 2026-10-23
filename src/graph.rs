@@ -29,11 +29,25 @@ impl fmt::Display for GraphError {
 
 impl std::error::Error for GraphError {}
 
+/// A resolved package: one node in the dependency graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Package {
+    pub name: String,
+    pub version: String,
+}
+
+impl Package {
+    /// `name version`, as shown in diagnostics.
+    pub fn label(&self) -> String {
+        format!("{} {}", self.name, self.version)
+    }
+}
+
 /// An indexed view of a project's resolved dependency graph.
 ///
-/// Nodes are labelled `name version`. Each node's edges point to its dependencies.
+/// Each node's edges point to its dependencies.
 pub struct DependencyGraph {
-    labels: Vec<String>,
+    packages: Vec<Package>,
     edges: Vec<Vec<usize>>,
     workspace: Vec<String>,
 }
@@ -84,7 +98,7 @@ impl DependencyGraph {
     /// appears once, and its edges are the union across targets.
     fn from_metadatas(metadatas: &[Metadata]) -> Result<Self, GraphError> {
         let mut graph = Self {
-            labels: Vec::new(),
+            packages: Vec::new(),
             edges: Vec::new(),
             workspace: Vec::new(),
         };
@@ -95,8 +109,11 @@ impl DependencyGraph {
 
             for pkg in &metadata.packages {
                 if !index.contains_key(&pkg.id) {
-                    index.insert(pkg.id.clone(), graph.labels.len());
-                    graph.labels.push(format!("{} {}", pkg.name, pkg.version));
+                    index.insert(pkg.id.clone(), graph.packages.len());
+                    graph.packages.push(Package {
+                        name: pkg.name.to_string(),
+                        version: pkg.version.to_string(),
+                    });
                     graph.edges.push(Vec::new());
                 }
             }
@@ -127,9 +144,14 @@ impl DependencyGraph {
         Ok(graph)
     }
 
+    /// Every resolved package, including the project's own crates.
+    pub fn packages(&self) -> &[Package] {
+        &self.packages
+    }
+
     /// Number of resolved packages, including the project itself.
     pub fn package_count(&self) -> usize {
-        self.labels.len()
+        self.packages.len()
     }
 
     /// Number of dependency edges between packages.
@@ -152,7 +174,7 @@ impl DependencyGraph {
             .map(|component| {
                 let mut labels: Vec<String> = component
                     .into_iter()
-                    .map(|ix| self.labels[ix].clone())
+                    .map(|ix| self.packages[ix].label())
                     .collect();
                 labels.sort();
                 labels

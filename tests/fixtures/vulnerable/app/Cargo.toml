@@ -1,0 +1,9 @@
+[package]
+name = "vulnerable-app"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+vuln-crate = { path = "../vuln" }
+clean-crate = { path = "../clean" }
