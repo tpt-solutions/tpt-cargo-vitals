@@ -8,6 +8,7 @@ use clap::{Parser, Subcommand};
 mod audit;
 mod cache;
 mod graph;
+mod license;
 mod update;
 
 use cache::{AdvisoryCache, Error, format_date};
@@ -33,7 +34,13 @@ enum Command {
         #[arg(long, default_value = ".")]
         path: PathBuf,
 
-        /// Exit non-zero when vulnerabilities are found.
+        /// Allowed SPDX license identifiers, comma-separated (e.g. `MIT`). Any
+        /// dependency whose license cannot be satisfied with these is a violation.
+        #[arg(long, alias = "allow-list", value_name = "LIST", value_delimiter = ',')]
+        enforce_license: Vec<String>,
+
+        /// Exit non-zero on license violations or vulnerabilities, and print a
+        /// tab-separated summary of each finding to stdout.
         #[arg(long)]
         ci_mode: bool,
 
@@ -87,6 +94,7 @@ fn run() -> Result<ExitCode, Error> {
         // dependency cycles, and known vulnerabilities.
         Command::Check {
             path,
+            enforce_license,
             ci_mode,
             max_db_age_days,
         } => {
@@ -100,6 +108,10 @@ fn run() -> Result<ExitCode, Error> {
             for cycle in graph.cycles() {
                 eprintln!("warning: dependency cycle: {}", cycle.join(" -> "));
             }
+
+            let policy = (!enforce_license.is_empty()).then_some(enforce_license.as_slice());
+            let licenses = license::check(&graph, policy);
+            print_license_summary(&licenses, &enforce_license);
 
             if !db_path.exists() {
                 return Err(format!(
@@ -141,7 +153,21 @@ fn run() -> Result<ExitCode, Error> {
                 }
             }
 
-            Ok(if ci_mode && !vulnerabilities.is_empty() {
+            if ci_mode {
+                for (label, license) in &licenses.violations {
+                    println!("license-violation\t{label}\t{license}");
+                }
+                for finding in &vulnerabilities {
+                    println!(
+                        "vulnerability\t{}\t{}\t{}",
+                        finding.advisory_id, finding.package, finding.version
+                    );
+                }
+            }
+
+            let failed =
+                ci_mode && (!licenses.violations.is_empty() || !vulnerabilities.is_empty());
+            Ok(if failed {
                 ExitCode::FAILURE
             } else {
                 ExitCode::SUCCESS
@@ -154,6 +180,40 @@ fn run() -> Result<ExitCode, Error> {
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+fn print_license_summary(report: &license::LicenseReport, policy: &[String]) {
+    if policy.is_empty() {
+        println!("Licenses: {} dependencies checked", report.checked);
+    } else {
+        println!(
+            "Licenses: {}% compliant with {} ({} of {} dependencies)",
+            percent(report.compliant(), report.checked),
+            policy.join(", "),
+            report.compliant(),
+            report.checked,
+        );
+        for (label, license) in &report.violations {
+            println!("  {label}: {license}");
+        }
+    }
+
+    let counts: Vec<String> = report
+        .counts
+        .iter()
+        .map(|(id, count)| format!("{count} {id}"))
+        .collect();
+    if !counts.is_empty() {
+        println!("  by license: {}", counts.join(", "));
+    }
+    if report.undeclared > 0 {
+        println!("  undeclared: {}", report.undeclared);
+    }
+}
+
+/// `part` as a whole percentage of `total`, rounded down. 100 when there is nothing to check.
+fn percent(part: usize, total: usize) -> usize {
+    (part * 100).checked_div(total).unwrap_or(100)
 }
 
 fn print_finding(finding: &audit::Finding) {

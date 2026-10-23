@@ -3,7 +3,7 @@
 //! `cargo metadata` does the resolution. We turn its resolve output into a plain
 //! adjacency list so the audit passes can traverse it without re-running Cargo.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::Path;
 
@@ -34,6 +34,10 @@ impl std::error::Error for GraphError {}
 pub struct Package {
     pub name: String,
     pub version: String,
+    /// The SPDX license expression from the package's manifest, if it declares one.
+    pub license: Option<String>,
+    /// True for the project's own crates, as opposed to dependencies.
+    pub workspace: bool,
 }
 
 impl Package {
@@ -97,6 +101,10 @@ impl DependencyGraph {
     /// Packages are identified by `PackageId`, so a package seen on two targets
     /// appears once, and its edges are the union across targets.
     fn from_metadatas(metadatas: &[Metadata]) -> Result<Self, GraphError> {
+        // Workspace membership is the same for every target, so read it from the first.
+        let first = metadatas.first().ok_or(GraphError::NoResolve)?;
+        let workspace_ids: HashSet<&PackageId> = first.workspace_members.iter().collect();
+
         let mut graph = Self {
             packages: Vec::new(),
             edges: Vec::new(),
@@ -113,6 +121,8 @@ impl DependencyGraph {
                     graph.packages.push(Package {
                         name: pkg.name.to_string(),
                         version: pkg.version.to_string(),
+                        license: pkg.license.clone(),
+                        workspace: workspace_ids.contains(&pkg.id),
                     });
                     graph.edges.push(Vec::new());
                 }
@@ -131,15 +141,12 @@ impl DependencyGraph {
             }
         }
 
-        // Workspace membership is the same for every target, so read it from the first.
-        if let Some(first) = metadatas.first() {
-            graph.workspace = first
-                .packages
-                .iter()
-                .filter(|pkg| first.workspace_members.contains(&pkg.id))
-                .map(|pkg| pkg.name.to_string())
-                .collect();
-        }
+        graph.workspace = graph
+            .packages
+            .iter()
+            .filter(|pkg| pkg.workspace)
+            .map(|pkg| pkg.name.clone())
+            .collect();
 
         Ok(graph)
     }
@@ -188,7 +195,9 @@ impl DependencyGraph {
 /// Runs `cargo metadata` for one target, or for the host when `target` is `None`.
 fn metadata_for(manifest: &Path, target: Option<&str>) -> Result<Metadata, GraphError> {
     let mut command = MetadataCommand::new();
-    command.manifest_path(manifest).features(CargoOpt::AllFeatures);
+    command
+        .manifest_path(manifest)
+        .features(CargoOpt::AllFeatures);
     if let Some(target) = target {
         command.other_options(["--filter-platform".to_owned(), target.to_owned()]);
     }
@@ -357,7 +366,13 @@ mod tests {
 
         let started = Instant::now();
         let output = Command::new(env!("CARGO"))
-            .args(["metadata", "--format-version", "1", "--all-features", "--manifest-path"])
+            .args([
+                "metadata",
+                "--format-version",
+                "1",
+                "--all-features",
+                "--manifest-path",
+            ])
             .arg(&manifest)
             .output()
             .expect("cargo metadata runs");
@@ -380,6 +395,9 @@ mod tests {
             "project packages: {packages}\ncargo metadata (subprocess): {cargo_ms:.1} ms\n\
              parse + graph build (best of 10): {best:.2} ms",
         );
-        assert!(best < 100.0, "parse+build took {best:.2} ms, budget is 100 ms");
+        assert!(
+            best < 100.0,
+            "parse+build took {best:.2} ms, budget is 100 ms"
+        );
     }
 }
