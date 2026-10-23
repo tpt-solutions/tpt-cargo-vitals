@@ -1,0 +1,21 @@
+# cargo-deny policy: self-enforces the pure MIT / Apache-2.0 dependency rule
+# (dogfooding Feature 2 of spec.txt). Run locally with: cargo deny check
+
+[licenses]
+version = 2
+# Only permissive licenses compatible with the project's MIT OR Apache-2.0 terms.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Unicode-3.0",   # required by unicode-ident (transitive via syn/clap_derive)
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

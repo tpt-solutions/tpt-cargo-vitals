@@ -1,0 +1,16 @@
+[package]
+name = "tpt-cargo-vitals"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["TPT Solutions"]
+license = "MIT OR Apache-2.0"
+description = "Local-first supply-chain & dependency auditor for Rust projects: CVEs, license policy, and bloat."
+repository = "https://github.com/tpt-solutions/tpt-cargo-vitals"
+homepage = "https://github.com/tpt-solutions/tpt-cargo-vitals"
+readme = "README.md"
+keywords = ["cargo", "audit", "security", "license", "dependencies"]
+categories = ["development-tools", "command-line-utilities"]
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
