@@ -39,6 +39,13 @@ enum Command {
         #[arg(long, alias = "allow-list", value_name = "LIST", value_delimiter = ',')]
         enforce_license: Vec<String>,
 
+        /// Licenses that dev-dependencies may also use, comma-separated. Applies only
+        /// to dependencies no build ships (reached through dev-dependencies alone), so
+        /// `Apache-2.0` here allows Apache-only test helpers without allowing it in
+        /// shipped code.
+        #[arg(long, value_name = "LIST", value_delimiter = ',')]
+        dev_allow: Vec<String>,
+
         /// Exit non-zero on license violations or vulnerabilities, and print a
         /// tab-separated summary of each finding to stdout.
         #[arg(long)]
@@ -95,6 +102,7 @@ fn run() -> Result<ExitCode, Error> {
         Command::Check {
             path,
             enforce_license,
+            dev_allow,
             ci_mode,
             max_db_age_days,
         } => {
@@ -110,7 +118,7 @@ fn run() -> Result<ExitCode, Error> {
             }
 
             let policy = (!enforce_license.is_empty()).then_some(enforce_license.as_slice());
-            let licenses = license::check(&graph, policy);
+            let licenses = license::check(&graph, policy, &dev_allow);
             print_license_summary(&licenses, &enforce_license);
 
             if !db_path.exists() {
@@ -208,6 +216,15 @@ fn print_license_summary(report: &license::LicenseReport, policy: &[String]) {
     }
     if report.undeclared > 0 {
         println!("  undeclared: {}", report.undeclared);
+    }
+    if report.dev_only > 0 {
+        println!("  dev-only (not shipped): {}", report.dev_only);
+    }
+    if report.inactive > 0 {
+        println!(
+            "  not enabled by any feature (not compiled, not checked): {}",
+            report.inactive
+        );
     }
 }
 

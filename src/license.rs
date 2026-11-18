@@ -7,7 +7,9 @@ use crate::graph::DependencyGraph;
 
 /// A parsed SPDX license expression.
 ///
-/// `WITH` exceptions are dropped, since policy is decided on the base license.
+/// `X WITH Y` is kept as one identifier, `"X WITH Y"`, so a policy can allow that
+/// exact license (for example `Apache-2.0 WITH LLVM-exception`) without allowing
+/// `X` alone.
 #[derive(Debug, PartialEq, Eq)]
 enum Expr {
     License(String),
@@ -130,11 +132,17 @@ impl Parser {
                 self.take(&Token::Close).then_some(inner)
             }
             Token::Id(id) => {
-                // `GPL-2.0 WITH Classpath-exception-2.0`: keep the base license only.
+                // `GPL-2.0 WITH Classpath-exception-2.0` is one license.
                 if self.take(&Token::With) {
-                    matches!(self.next()?, Token::Id(_)).then_some(())?;
+                    match self.next()? {
+                        Token::Id(exception) => {
+                            Some(Expr::License(format!("{id} WITH {exception}")))
+                        }
+                        _ => None,
+                    }
+                } else {
+                    Some(Expr::License(id))
                 }
-                Some(Expr::License(id))
             }
             _ => None,
         }
@@ -170,6 +178,12 @@ pub struct LicenseReport {
     pub counts: BTreeMap<String, usize>,
     /// Dependencies with no declared license, or one that does not parse.
     pub undeclared: usize,
+    /// Dependencies that no build ships (reached only through dev-dependencies).
+    /// Each is checked against the policy plus the dev allowance.
+    pub dev_only: usize,
+    /// Dependencies that no enabled feature turns on. They are listed by
+    /// `cargo metadata` but never compiled, so they are not checked.
+    pub inactive: usize,
 }
 
 impl LicenseReport {
@@ -181,11 +195,27 @@ impl LicenseReport {
 
 /// Checks every dependency in `graph`. With `allowed` set to `Some`, a dependency
 /// is a violation unless its license can be satisfied with only those identifiers.
-pub fn check(graph: &DependencyGraph, allowed: Option<&[String]>) -> LicenseReport {
+///
+/// A dev-only dependency (see [`Package::dev_only`]) may also use the identifiers in
+/// `dev_allowed`, since no build ships it. The policy uses this for `Apache-2.0`
+/// alone, which is allowed in dev-dependencies only. Shipped dependencies never get
+/// the dev allowance.
+pub fn check(
+    graph: &DependencyGraph,
+    allowed: Option<&[String]>,
+    dev_allowed: &[String],
+) -> LicenseReport {
     let mut report = LicenseReport::default();
 
     for pkg in graph.packages().iter().filter(|pkg| !pkg.workspace) {
+        if pkg.inactive {
+            report.inactive += 1;
+            continue;
+        }
         report.checked += 1;
+        if pkg.dev_only {
+            report.dev_only += 1;
+        }
         let expr = pkg.license.as_deref().and_then(Expr::parse);
 
         match &expr {
@@ -200,7 +230,12 @@ pub fn check(graph: &DependencyGraph, allowed: Option<&[String]>) -> LicenseRepo
         }
 
         if let Some(allowed) = allowed {
-            let passes = expr.as_ref().is_some_and(|expr| expr.satisfied_by(allowed));
+            let extra: Vec<String> = if pkg.dev_only {
+                allowed.iter().chain(dev_allowed).cloned().collect()
+            } else {
+                allowed.to_vec()
+            };
+            let passes = expr.as_ref().is_some_and(|expr| expr.satisfied_by(&extra));
             if !passes {
                 let license = pkg.license.as_deref().unwrap_or("none");
                 report.violations.push((pkg.label(), license.to_owned()));
@@ -238,9 +273,17 @@ mod tests {
     }
 
     #[test]
-    fn with_exception_is_judged_on_base_license() {
+    fn with_exception_is_one_license() {
         let expr = Expr::parse("GPL-2.0-only WITH Classpath-exception-2.0").unwrap();
-        assert!(expr.satisfied_by(&allow(&["GPL-2.0-only"])));
+        assert!(expr.satisfied_by(&allow(&["GPL-2.0-only WITH Classpath-exception-2.0"])));
+        assert!(!expr.satisfied_by(&allow(&["GPL-2.0-only"])));
+    }
+
+    #[test]
+    fn exception_is_matched_case_insensitively_as_a_whole() {
+        let expr = Expr::parse("Apache-2.0 WITH LLVM-exception OR MIT").unwrap();
+        assert!(expr.satisfied_by(&allow(&["apache-2.0 with llvm-exception"])));
+        assert!(!expr.satisfied_by(&allow(&["Apache-2.0"])));
     }
 
     #[test]
@@ -271,7 +314,7 @@ mod tests {
     #[test]
     fn pure_mit_policy_flags_non_mit_and_undeclared_dependencies() {
         let graph = DependencyGraph::load(&fixture()).unwrap();
-        let report = check(&graph, Some(&allow(&["MIT"])));
+        let report = check(&graph, Some(&allow(&["MIT"])), &[]);
 
         // Six dependencies; the project's own crate is excluded.
         assert_eq!(report.checked, 6);
@@ -294,7 +337,11 @@ mod tests {
     #[test]
     fn policy_can_allow_several_licenses() {
         let graph = DependencyGraph::load(&fixture()).unwrap();
-        let report = check(&graph, Some(&allow(&["MIT", "Apache-2.0", "Unicode-3.0"])));
+        let report = check(
+            &graph,
+            Some(&allow(&["MIT", "Apache-2.0", "Unicode-3.0"])),
+            &[],
+        );
 
         // Only the GPL crate and the undeclared one still fail.
         let failing: Vec<&str> = report
@@ -308,7 +355,7 @@ mod tests {
     #[test]
     fn counts_each_identifier_an_expression_names() {
         let graph = DependencyGraph::load(&fixture()).unwrap();
-        let report = check(&graph, None);
+        let report = check(&graph, None, &[]);
 
         assert!(
             report.violations.is_empty(),
@@ -318,5 +365,51 @@ mod tests {
         assert_eq!(report.counts["Apache-2.0"], 3); // lic-apache, lic-dual, lic-and
         assert_eq!(report.counts["GPL-3.0-only"], 1);
         assert_eq!(report.counts["Unicode-3.0"], 1);
+    }
+
+    #[test]
+    fn dev_allowance_covers_only_dev_only_dependencies() {
+        // lic-apache is a dev-dependency of the devonly fixture, so it is not shipped.
+        let devonly = DependencyGraph::load(&devonly_fixture()).unwrap();
+        let strict = check(&devonly, Some(&allow(&["MIT"])), &[]);
+        // lic-mit ships and lic-apache is dev-only.
+        assert_eq!(strict.checked, 2);
+        assert_eq!(strict.dev_only, 1);
+        assert_eq!(strict.inactive, 0);
+        assert_eq!(
+            strict.violations,
+            [("lic-apache 0.1.0".to_owned(), "Apache-2.0".to_owned())]
+        );
+        let relaxed = check(&devonly, Some(&allow(&["MIT"])), &allow(&["Apache-2.0"]));
+        assert!(relaxed.violations.is_empty(), "{:?}", relaxed.violations);
+
+        // The same license in a shipped dependency is still a violation.
+        let shipped = DependencyGraph::load(&fixture()).unwrap();
+        let report = check(&shipped, Some(&allow(&["MIT"])), &allow(&["Apache-2.0"]));
+        assert_eq!(report.dev_only, 0);
+        assert!(
+            report
+                .violations
+                .contains(&("lic-apache 0.1.0".to_owned(), "Apache-2.0".to_owned()))
+        );
+    }
+
+    #[test]
+    fn optional_dependency_that_no_feature_enables_is_not_checked() {
+        // lic-wrap's optional lic-gpl is switched on only by its `gpl` feature, which
+        // this workspace does not enable. cargo metadata still lists the edge.
+        let graph = DependencyGraph::load(&inactive_fixture()).unwrap();
+        let report = check(&graph, Some(&allow(&["MIT"])), &[]);
+        assert_eq!(report.checked, 1); // lic-wrap only
+        assert_eq!(report.inactive, 1); // lic-gpl
+        assert!(report.violations.is_empty(), "{:?}", report.violations);
+    }
+
+    fn inactive_fixture() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/licenses/inactive")
+    }
+
+    fn devonly_fixture() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/licenses/devonly")
     }
 }

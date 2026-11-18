@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::Path;
 
-use cargo_metadata::{CargoOpt, Metadata, MetadataCommand, PackageId};
+use cargo_metadata::{CargoOpt, DependencyKind, Metadata, MetadataCommand, NodeDep, PackageId};
 
 /// Why a graph could not be built.
 #[derive(Debug)]
@@ -38,6 +38,14 @@ pub struct Package {
     pub license: Option<String>,
     /// True for the project's own crates, as opposed to dependencies.
     pub workspace: bool,
+    /// True when no build of the project ships this package: it is reached only
+    /// through dev-dependencies, such as a test helper. Workspace crates are never
+    /// dev-only.
+    pub dev_only: bool,
+    /// True when no enabled feature activates any path to this package. Such a
+    /// package is listed by `cargo metadata` but is never compiled, for example an
+    /// optional dependency whose feature is off. Workspace crates are never inactive.
+    pub inactive: bool,
 }
 
 impl Package {
@@ -111,6 +119,10 @@ impl DependencyGraph {
             workspace: Vec::new(),
         };
         let mut index: HashMap<PackageId, usize> = HashMap::new();
+        // Edges that a shipped build uses (a normal or build dependency that an enabled
+        // feature activates), and edges that any build uses (including dev-dependencies).
+        let mut shipped_edges: HashSet<(usize, usize)> = HashSet::new();
+        let mut active_edges: HashSet<(usize, usize)> = HashSet::new();
 
         for metadata in metadatas {
             let resolve = metadata.resolve.as_ref().ok_or(GraphError::NoResolve)?;
@@ -123,13 +135,23 @@ impl DependencyGraph {
                         version: pkg.version.to_string(),
                         license: pkg.license.clone(),
                         workspace: workspace_ids.contains(&pkg.id),
+                        dev_only: false,
+                        inactive: false,
                     });
                     graph.edges.push(Vec::new());
                 }
             }
 
+            let declared: HashMap<PackageId, &cargo_metadata::Package> = metadata
+                .packages
+                .iter()
+                .map(|pkg| (pkg.id.clone(), pkg))
+                .collect();
+
             for node in &resolve.nodes {
                 let from = index[&node.id];
+                let owner = declared.get(&node.id).copied();
+                let enabled: Vec<String> = node.features.iter().map(ToString::to_string).collect();
                 for dep in &node.deps {
                     // A package can reach the same dependency under several names
                     // (renames, or normal + dev); keep one edge per pair.
@@ -137,9 +159,26 @@ impl DependencyGraph {
                     if !graph.edges[from].contains(&to) {
                         graph.edges[from].push(to);
                     }
+                    // An edge with no kind information is a normal dependency.
+                    let kinds: Vec<DependencyKind> = if dep.dep_kinds.is_empty() {
+                        vec![DependencyKind::Normal]
+                    } else {
+                        dep.dep_kinds.iter().map(|info| info.kind).collect()
+                    };
+                    for kind in kinds {
+                        if !edge_is_active(owner, &enabled, dep, kind) {
+                            continue;
+                        }
+                        active_edges.insert((from, to));
+                        if kind != DependencyKind::Development {
+                            shipped_edges.insert((from, to));
+                        }
+                    }
                 }
             }
         }
+
+        graph.mark_build_membership(&shipped_edges, &active_edges);
 
         graph.workspace = graph
             .packages
@@ -149,6 +188,50 @@ impl DependencyGraph {
             .collect();
 
         Ok(graph)
+    }
+
+    /// Sets `dev_only` and `inactive` from the edges that a build uses, reached from
+    /// the workspace crates. A package reached by a shipped edge is shipped. A
+    /// package reached only through dev edges is dev-only. A package reached by no
+    /// active edge is inactive.
+    fn mark_build_membership(
+        &mut self,
+        shipped_edges: &HashSet<(usize, usize)>,
+        active_edges: &HashSet<(usize, usize)>,
+    ) {
+        let shipped = self.reachable_from_workspace(shipped_edges);
+        let active = self.reachable_from_workspace(active_edges);
+        for (ix, pkg) in self.packages.iter_mut().enumerate() {
+            pkg.dev_only = !shipped[ix] && active[ix];
+            pkg.inactive = !active[ix];
+        }
+    }
+
+    /// For each package, whether it can be reached from a workspace crate over `edges`.
+    fn reachable_from_workspace(&self, edges: &HashSet<(usize, usize)>) -> Vec<bool> {
+        let count = self.packages.len();
+        let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); count];
+        for &(from, to) in edges {
+            adjacency[from].push(to);
+        }
+
+        let mut reached = vec![false; count];
+        let mut stack: Vec<usize> = Vec::new();
+        for (ix, pkg) in self.packages.iter().enumerate() {
+            if pkg.workspace {
+                reached[ix] = true;
+                stack.push(ix);
+            }
+        }
+        while let Some(ix) = stack.pop() {
+            for &next in &adjacency[ix] {
+                if !reached[next] {
+                    reached[next] = true;
+                    stack.push(next);
+                }
+            }
+        }
+        reached
     }
 
     /// Every resolved package, including the project's own crates.
@@ -190,6 +273,61 @@ impl DependencyGraph {
         cycles.sort();
         cycles
     }
+}
+
+/// Whether a dependency edge is active: its kind is used, and if the dependency is
+/// optional, an enabled feature turns it on.
+///
+/// `cargo metadata` lists optional dependencies even when no feature enables them,
+/// so the feature check is what separates a compiled edge from a listed one. An
+/// optional dependency `key` is on when the enabled features include `key` itself,
+/// or a feature that names `dep:key` or `key/...`. `key?/...` does not turn it on.
+fn edge_is_active(
+    owner: Option<&cargo_metadata::Package>,
+    enabled: &[String],
+    dep: &NodeDep,
+    kind: DependencyKind,
+) -> bool {
+    let Some(owner) = owner else {
+        return true;
+    };
+    let wanted = dep.name.to_string().replace('-', "_");
+    let declared: Vec<&cargo_metadata::Dependency> = owner
+        .dependencies
+        .iter()
+        .filter(|declared| {
+            declared.kind == kind
+                && declared
+                    .rename
+                    .clone()
+                    .unwrap_or_else(|| declared.name.clone())
+                    .replace('-', "_")
+                    == wanted
+        })
+        .collect();
+    // No declaration to check against: treat the edge as active.
+    if declared.is_empty() {
+        return true;
+    }
+    declared.iter().any(|declared| {
+        if !declared.optional {
+            return true;
+        }
+        let key = declared
+            .rename
+            .clone()
+            .unwrap_or_else(|| declared.name.clone());
+        let dep_feature = format!("dep:{key}");
+        let slash = format!("{key}/");
+        enabled.iter().any(|feature| {
+            *feature == key
+                || owner.features.get(feature).is_some_and(|list| {
+                    list.iter().any(|entry| {
+                        *entry == dep_feature || *entry == key || entry.starts_with(&slash)
+                    })
+                })
+        })
+    })
 }
 
 /// Runs `cargo metadata` for one target, or for the host when `target` is `None`.

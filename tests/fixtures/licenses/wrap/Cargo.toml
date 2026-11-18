@@ -1,0 +1,16 @@
+[package]
+name = "lic-wrap"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+
+[dependencies]
+# Optional. `gpl` turns it on; `alloc` only names it as a weak dependency, which
+# does not turn it on. The workspace enables `alloc`, but not `gpl`.
+lic-gpl = { path = "../gpl", optional = true }
+
+[features]
+default = []
+alloc = ["lic-gpl?/alloc"]
+gpl = ["dep:lic-gpl"]
