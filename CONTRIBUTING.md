@@ -6,18 +6,8 @@ and [todo.md](todo.md) before proposing larger changes.
 
 ## Workflow
 
-1. Open an issue describing the bug or feature (or comment on an existing one).
-2. Fork, create a branch, and make focused commits.
-3. Before opening a PR, run:
-
-   ```sh
-   cargo fmt --all
-   cargo clippy --all-targets -- -D warnings
-   cargo test --all-targets
-   cargo deny check
-   ```
-
-4. Open a PR against `master`. CI must be green.
+Contributions are accepted through issues only. Open an issue describing the bug
+or feature, or comment on an existing one. Code changes are made by the maintainer.
 
 ## Dependency policy
 
