@@ -1,0 +1,9 @@
+[package]
+name = "lic-inactive"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+
+[dependencies]
+lic-wrap = { path = "../wrap", features = ["alloc"] }

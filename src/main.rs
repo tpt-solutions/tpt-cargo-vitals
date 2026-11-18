@@ -8,6 +8,7 @@ use clap::{Arg, ArgAction, Command, value_parser};
 mod advisory;
 mod audit;
 mod cache;
+mod deny;
 mod graph;
 mod license;
 mod update;
@@ -44,6 +45,38 @@ fn cli() -> Command {
                         .help(
                             "Allowed SPDX license identifiers, comma-separated (e.g. `MIT`). \
                              Any dependency whose license cannot be satisfied with these is a violation.",
+                        ),
+                )
+                .arg(
+                    Arg::new("dev-allow")
+                        .long("dev-allow")
+                        .value_name("LIST")
+                        .value_delimiter(',')
+                        .help(
+                            "Licenses that dev-dependencies may also use, comma-separated. \
+                             Applies only to dependencies no build ships, so `Apache-2.0` here \
+                             allows Apache-only test helpers without allowing it in shipped code.",
+                        ),
+                )
+                .arg(
+                    Arg::new("exception")
+                        .long("exception")
+                        .value_name("CRATE=LICENSE")
+                        .action(ArgAction::Append)
+                        .help(
+                            "A license one crate may use in addition to the policy, as \
+                             `CRATE=LICENSE` (repeatable). It applies to that crate only.",
+                        ),
+                )
+                .arg(
+                    Arg::new("deny-config")
+                        .long("deny-config")
+                        .value_name("FILE")
+                        .value_parser(value_parser!(PathBuf))
+                        .help(
+                            "The project's `deny.toml`, whose `[advisories] ignore` list names \
+                             the advisories it accepts. Defaults to `deny.toml` in the project \
+                             directory. Accepted advisories are listed but do not fail `--ci-mode`.",
                         ),
                 )
                 .arg(
@@ -126,6 +159,15 @@ fn run() -> Result<ExitCode, Error> {
                 .get_many::<String>("enforce-license")
                 .map(|values| values.cloned().collect())
                 .unwrap_or_default();
+            let dev_allow: Vec<String> = args
+                .get_many::<String>("dev-allow")
+                .map(|values| values.cloned().collect())
+                .unwrap_or_default();
+            let exception: Vec<String> = args
+                .get_many::<String>("exception")
+                .map(|values| values.cloned().collect())
+                .unwrap_or_default();
+            let deny_config = args.get_one::<PathBuf>("deny-config").cloned();
             let ci_mode = args.get_flag("ci-mode");
             let max_db_age_days = *args
                 .get_one::<u32>("max-db-age-days")
@@ -143,7 +185,8 @@ fn run() -> Result<ExitCode, Error> {
             }
 
             let policy = (!enforce_license.is_empty()).then_some(enforce_license.as_slice());
-            let licenses = license::check(&graph, policy);
+            let exceptions = parse_exceptions(&exception)?;
+            let licenses = license::check_with(&graph, policy, &dev_allow, &exceptions);
             print_license_summary(&licenses, &enforce_license);
 
             if !db_path.exists() {
@@ -165,8 +208,13 @@ fn run() -> Result<ExitCode, Error> {
             }
 
             let findings = audit::find_vulnerabilities(&graph, &cache)?;
+            let deny_path = deny_config.unwrap_or_else(|| path.join("deny.toml"));
+            let accepted = deny::accepted_advisories(&deny_path)?;
             let (vulnerabilities, notices): (Vec<_>, Vec<_>) =
                 findings.iter().partition(|finding| !finding.informational);
+            let (accepted_findings, vulnerabilities): (Vec<_>, Vec<_>) = vulnerabilities
+                .into_iter()
+                .partition(|finding| accepted.contains_key(&finding.advisory_id));
 
             let db_date = format_date(fetched_at);
             println!(
@@ -175,6 +223,20 @@ fn run() -> Result<ExitCode, Error> {
             );
             for finding in &vulnerabilities {
                 print_finding(finding);
+            }
+            if !accepted_findings.is_empty() {
+                println!(
+                    "Accepted: {} advisories ignored by {}",
+                    accepted_findings.len(),
+                    deny_path.display()
+                );
+                for finding in &accepted_findings {
+                    let reason = &accepted[&finding.advisory_id];
+                    println!(
+                        "  {} {} {}: {reason}",
+                        finding.advisory_id, finding.package, finding.version
+                    );
+                }
             }
             if !notices.is_empty() {
                 println!(
@@ -224,6 +286,19 @@ fn path_of(args: &clap::ArgMatches) -> PathBuf {
         .clone()
 }
 
+/// Splits each `CRATE=LICENSE` argument. Both halves must be non-empty.
+fn parse_exceptions(items: &[String]) -> Result<Vec<(String, String)>, String> {
+    items
+        .iter()
+        .map(|item| {
+            item.split_once('=')
+                .filter(|(krate, license)| !krate.is_empty() && !license.is_empty())
+                .map(|(krate, license)| (krate.to_owned(), license.to_owned()))
+                .ok_or_else(|| format!("--exception {item:?} must be CRATE=LICENSE"))
+        })
+        .collect()
+}
+
 fn print_license_summary(report: &license::LicenseReport, policy: &[String]) {
     if policy.is_empty() {
         println!("Licenses: {} dependencies checked", report.checked);
@@ -250,6 +325,15 @@ fn print_license_summary(report: &license::LicenseReport, policy: &[String]) {
     }
     if report.undeclared > 0 {
         println!("  undeclared: {}", report.undeclared);
+    }
+    if report.dev_only > 0 {
+        println!("  dev-only (not shipped): {}", report.dev_only);
+    }
+    if report.inactive > 0 {
+        println!(
+            "  not enabled by any feature (not compiled, not checked): {}",
+            report.inactive
+        );
     }
 }
 
