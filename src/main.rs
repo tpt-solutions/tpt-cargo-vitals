@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 
 mod audit;
 mod cache;
+mod deny;
 mod graph;
 mod license;
 mod update;
@@ -51,6 +52,12 @@ enum Command {
         /// for example `webpki-roots=CDLA-Permissive-2.0`.
         #[arg(long, value_name = "CRATE=LICENSE")]
         exception: Vec<String>,
+
+        /// The project's `deny.toml`, whose `[advisories] ignore` list names the
+        /// advisories it accepts. Defaults to `deny.toml` in the project directory.
+        /// Accepted advisories are listed but do not fail `--ci-mode`.
+        #[arg(long, value_name = "FILE")]
+        deny_config: Option<PathBuf>,
 
         /// Exit non-zero on license violations or vulnerabilities, and print a
         /// tab-separated summary of each finding to stdout.
@@ -110,6 +117,7 @@ fn run() -> Result<ExitCode, Error> {
             enforce_license,
             dev_allow,
             exception,
+            deny_config,
             ci_mode,
             max_db_age_days,
         } => {
@@ -148,8 +156,13 @@ fn run() -> Result<ExitCode, Error> {
             }
 
             let findings = audit::find_vulnerabilities(&graph, &cache)?;
+            let deny_path = deny_config.unwrap_or_else(|| path.join("deny.toml"));
+            let accepted = deny::accepted_advisories(&deny_path)?;
             let (vulnerabilities, notices): (Vec<_>, Vec<_>) =
                 findings.iter().partition(|finding| !finding.informational);
+            let (accepted_findings, vulnerabilities): (Vec<_>, Vec<_>) = vulnerabilities
+                .into_iter()
+                .partition(|finding| accepted.contains_key(&finding.advisory_id));
 
             let db_date = format_date(fetched_at);
             println!(
@@ -158,6 +171,20 @@ fn run() -> Result<ExitCode, Error> {
             );
             for finding in &vulnerabilities {
                 print_finding(finding);
+            }
+            if !accepted_findings.is_empty() {
+                println!(
+                    "Accepted: {} advisories ignored by {}",
+                    accepted_findings.len(),
+                    deny_path.display()
+                );
+                for finding in &accepted_findings {
+                    let reason = &accepted[&finding.advisory_id];
+                    println!(
+                        "  {} {} {}: {reason}",
+                        finding.advisory_id, finding.package, finding.version
+                    );
+                }
             }
             if !notices.is_empty() {
                 println!(

@@ -1218,6 +1218,7 @@ dependencies = [
  "rusqlite",
  "rustsec",
  "tar",
+ "toml 0.8.23",
  "ureq",
 ]
 
