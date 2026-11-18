@@ -62,7 +62,13 @@ impl Package {
 /// Each node's edges point to its dependencies.
 pub struct DependencyGraph {
     packages: Vec<Package>,
+    /// Every resolved edge, including ones no enabled feature turns on.
     edges: Vec<Vec<usize>>,
+    /// Edges a build compiles (any kind, including dev), i.e. `edges` without
+    /// the inactive ones. Used by `why`.
+    active: Vec<Vec<usize>>,
+    /// Edges a shipped build uses (normal or build kind). Used by bloat analysis.
+    shipped: Vec<Vec<usize>>,
     workspace: Vec<String>,
 }
 
@@ -127,6 +133,8 @@ impl DependencyGraph {
         let mut graph = Self {
             packages: Vec::new(),
             edges: Vec::new(),
+            active: Vec::new(),
+            shipped: Vec::new(),
             workspace: Vec::new(),
         };
         let mut index: HashMap<&str, usize> = HashMap::new();
@@ -154,6 +162,8 @@ impl DependencyGraph {
                         inactive: false,
                     });
                     graph.edges.push(Vec::new());
+                    graph.active.push(Vec::new());
+                    graph.shipped.push(Vec::new());
                 }
             }
 
@@ -190,6 +200,17 @@ impl DependencyGraph {
             }
         }
 
+        // The edge sets come from HashSets, so sort each list to keep traversal
+        // (and therefore `why` output) deterministic.
+        for &(from, to) in &active_edges {
+            graph.active[from].push(to);
+        }
+        for &(from, to) in &shipped_edges {
+            graph.shipped[from].push(to);
+        }
+        for list in graph.active.iter_mut().chain(graph.shipped.iter_mut()) {
+            list.sort_unstable();
+        }
         graph.mark_build_membership(&shipped_edges, &active_edges);
 
         graph.workspace = graph
@@ -257,11 +278,33 @@ impl DependencyGraph {
     }
 
     /// Number of dependency edges between packages.
+    #[cfg(test)]
     pub fn link_count(&self) -> usize {
         self.edges.iter().map(Vec::len).sum()
     }
 
+    /// Dependencies of package `ix` that a build compiles (any kind, including dev).
+    pub fn active_dependencies(&self, ix: usize) -> &[usize] {
+        &self.active[ix]
+    }
+
+    /// Dependencies of package `ix` that a shipped build uses (normal or build kind).
+    pub fn shipped_dependencies(&self, ix: usize) -> &[usize] {
+        &self.shipped[ix]
+    }
+
+    /// Indices of the workspace members, which are the project's own crates.
+    pub fn workspace_indices(&self) -> Vec<usize> {
+        self.packages
+            .iter()
+            .enumerate()
+            .filter(|(_, pkg)| pkg.workspace)
+            .map(|(ix, _)| ix)
+            .collect()
+    }
+
     /// Names of the workspace members, which are the project's own crates.
+    #[cfg(test)]
     pub fn workspace_members(&self) -> Vec<&str> {
         self.workspace.iter().map(String::as_str).collect()
     }
@@ -574,9 +617,9 @@ mod tests {
     /// Parse + graph-build budget from spec §3 (< 100ms). `cargo metadata` itself
     /// is timed separately because it is outside the graph builder's control.
     ///
-    /// Run with: `cargo test --release -- --ignored --nocapture parse_budget`
+    /// Runs in the normal test suite as a regression guard. For the detailed timing
+    /// numbers, run with: `cargo test --release -- --nocapture parse_budget`
     #[test]
-    #[ignore = "timing benchmark, run in release mode"]
     fn parse_budget() {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
 

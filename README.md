@@ -5,9 +5,9 @@ dependency trees. Think of it as a "vitals check" for any Rust project: it flags
 vulnerable crates, license violations, and dependency bloat, without sending
 any metadata to external services.
 
-> **Status:** early development (v0.1.0 in progress). Subcommands are scaffolded;
-> the audit engine is not implemented yet. See [todo.md](todo.md) for the
-> phased roadmap and [spec.txt](spec.txt) for the full design.
+> **Status:** pre-release (v0.1.0 not yet cut). The dashboard, license policy,
+> offline vulnerability audit, bloat analysis, and `why` are implemented. See
+> [todo.md](todo.md) for the remaining items and [spec.txt](spec.txt) for the full design.
 
 ## Why
 
@@ -61,14 +61,61 @@ tpt-cargo-vitals why tokio
 
 Run `tpt-cargo-vitals --help` or `tpt-cargo-vitals <subcommand> --help` for all options.
 
-### Planned output
+### Example output
 
 ```text
-✅ tpt-mcpbox v0.1.0
-├─ 🛡️ Security: 0 vulnerabilities found (Local DB: 2026-09-08)
-├─ ⚖️ Licenses: 100% compliant (42 MIT, 0 Apache, 0 GPL)
-└─ 📦 Bloat: Low (Max transitive depth: 4, Total crates: 45)
+[ok] tpt-cargo-vitals v0.1.0
+├─ [ok] Security: 0 vulnerabilities found (Local DB: 2026-10-23)
+├─ [ok] Licenses: 100% compliant with MIT (67 of 67 dependencies)
+└─ [ok] Bloat: Low (Max transitive depth: 5, Total crates: 67)
 ```
+
+On an interactive terminal the sections use ✅ / ⚠️ / ❌ and color. In `--ci-mode`,
+or when output is piped, they use plain `[ok]` / `[warn]` / `[fail]` with no color.
+Setting `NO_COLOR` turns off color only.
+
+Each section is `fail` on a vulnerability or license violation, `warn` on a stale
+cache, an informational advisory, an undeclared license, or a crate with 50 or more
+transitive dependencies. The overall line takes the worst section's status.
+
+## Commands
+
+### `check`
+
+Prints the dashboard for a project, followed by details for each finding.
+
+| Option | Meaning |
+| --- | --- |
+| `--path <DIR>` | Project directory containing `Cargo.toml`. Default `.`. |
+| `--enforce-license <LIST>` | Allowed SPDX identifiers, comma-separated (alias `--allow-list`). |
+| `--dev-allow <LIST>` | Licenses that dev-only dependencies may also use. |
+| `--exception <CRATE=LICENSE>` | Lets one crate use one extra license. Repeatable. |
+| `--deny-config <FILE>` | Advisory policy file. Default `deny.toml` in the project. |
+| `--ci-mode` | Exit 1 on a license violation or vulnerability. Print a tab-separated summary. |
+| `--max-db-age-days <DAYS>` | Warn when the cache is older than this. Default 30. |
+| `--db <PATH>` | Cache file. Default `~/.tpt/vitals/cve.db`. |
+
+Accepted advisories are the `ignore` entries in `deny.toml`. They are listed but do
+not fail `--ci-mode`.
+
+Bloat counts only the shipped build. Dev-dependencies and optional dependencies that
+no enabled feature turns on are not counted.
+
+### `why <CRATE>`
+
+Prints the shortest dependency chain from one of the project's crates to each
+compiled version of `<CRATE>`. Chains that pass only through dev-dependencies are
+marked `(dev-only: not shipped)`.
+
+```text
+tokio 1.32.0 is required by: tpt-mcpbox 0.1.0 -> wasmtime 0.5.0
+```
+
+### `update`
+
+Downloads the RustSec advisory database and replaces the local cache. This is the
+only command that uses the network. It runs the system `curl`, so `curl` must be on
+`PATH`.
 
 ## Local CVE cache
 
@@ -76,7 +123,17 @@ Run `tpt-cargo-vitals --help` or `tpt-cargo-vitals <subcommand> --help` for all 
 SQLite file at `~/.tpt/vitals/cve.db`. `check` and `why` read only from this
 cache, so audits work air-gapped once the cache exists.
 
-*Cache cadence and air-gapped setup will be documented once the update command lands.*
+- **Location.** `~/.tpt/vitals/cve.db`, from `HOME` or, on Windows, `USERPROFILE`.
+  Override with `--db <PATH>` on any command.
+- **Cadence.** Nothing refreshes the cache automatically. Run `update` yourself,
+  for example before CI runs or on a schedule. `check` prints a warning on stderr
+  when the cache is older than `--max-db-age-days` (default 30). It still runs.
+- **Air-gapped use.** Run `update` on a machine with network access. Copy the
+  resulting `cve.db` to the air-gapped machine and pass it with `--db`. `check`
+  and `why` never make a network call. Refreshing the cache on the air-gapped
+  machine requires the same file to be copied in again.
+- **Missing cache.** `check` stops with an error that names `update` when no cache
+  exists. It does not run an audit with an empty database.
 
 ## Development
 

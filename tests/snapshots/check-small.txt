@@ -1,0 +1,5 @@
+[warn] small-app v0.1.0
+├─ [ok] Security: 0 vulnerabilities found (Local DB: 1970-01-01)
+├─ [warn] Licenses: 3 dependencies checked
+└─ [ok] Bloat: Low (Max transitive depth: 2, Total crates: 3)
+  undeclared: 3 (no license in the manifest)

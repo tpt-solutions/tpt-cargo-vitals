@@ -85,32 +85,48 @@ License: dual **MIT OR Apache-2.0** (copyright: TPT Solutions).
       pass/fail and correct counts (`tests/fixtures/licenses`)
 
 ## Phase 4 — Bloat Analysis & "Why is this here?" Command
-- [ ] Compute transitive depth and total transitive-dependency count per crate
-- [ ] Bloat scoring/threshold (e.g. flag crates pulling in 50+ transitive deps,
-      per spec §3)
+- [x] Compute transitive depth and total transitive-dependency count per crate
+      (`src/bloat.rs`: depth is the shortest shipped-edge distance from a project crate;
+      the count is distinct shipped packages reachable from the crate)
+- [x] Bloat scoring/threshold (e.g. flag crates pulling in 50+ transitive deps,
+      per spec §3) — `bloat::HEAVY_THRESHOLD` = 50; a crate at or above it is `heavy`
+      and turns the Bloat section to `warn`
 - [ ] Detect unused-but-enabled features where feasible (e.g. the `serde` +
-      "derive" example in spec §5 Feature 1) — scope feasibility during
-      implementation; may need a heuristic rather than full feature-usage
-      analysis
-- [ ] Implement `tpt-cargo-vitals why <crate>`: shortest/representative
-      dependency path(s) from root to the named crate (spec §5 Feature 4)
-- [ ] Tests: fixture tree with a known deep/bloated dependency chain; assert
-      `why` output matches expected path
+      "derive" example in spec §5 Feature 1) — **deferred.** Knowing that a feature is
+      unused needs to know which items of a crate each feature gates and whether the
+      project's source uses them. Name-matching on source would give false positives
+      on the exact cases the spec cares about, so this is not built yet.
+- [x] Implement `tpt-cargo-vitals why <crate>`: shortest dependency path from a project
+      crate to each compiled version (`src/why.rs`; spec §5 Feature 4). Dev-only chains
+      are marked. Inactive optional dependencies are reported as not compiled.
+- [x] Tests: `tests/fixtures/{small,medium}` for path and dev-only chains;
+      `bloat` tests with a lowered threshold, since the fixtures are too small to reach 50
 
 ## Phase 5 — Vitals Dashboard & CLI UX
-- [ ] Add `owo-colors` (MIT) + `comfy-table` (MIT) for terminal output
-- [ ] Implement `tpt-cargo-vitals check` combined dashboard output matching
-      spec §5 Feature 1 (security / licenses / bloat sections, ✅/⚠️/❌ status)
-- [ ] Color-degrades gracefully in non-TTY / `--ci-mode` (plain text / no emoji)
-- [ ] Actionable remediation text for warnings (e.g. "Consider removing unused
-      feature X to save Yms compile time")
-- [ ] `--help` text and man-page-style usage docs for all subcommands
+- [x] Add `owo-colors` (MIT) + `comfy-table` (MIT) for terminal output
+      (`src/dashboard.rs`; the heavy-crate table uses comfy-table)
+- [x] Implement `tpt-cargo-vitals check` combined dashboard output matching
+      spec §5 Feature 1 (security / licenses / bloat sections, ✅/⚠️/❌ status) —
+      the header shows the worst status; each section has its own
+- [x] Color-degrades gracefully in non-TTY / `--ci-mode` (plain text / no emoji)
+      — also honours `NO_COLOR`
+- [x] Actionable remediation text for warnings — vulnerabilities name the patched
+      version (or say there is none), license violations list the three options,
+      heavy crates point at `why`. The spec's "save Yms compile time" wording is
+      not used: it needs the unused-feature analysis that is deferred above.
+- [x] `--help` text and man-page-style usage docs for all subcommands — extended
+      `long_help` per subcommand and a Commands section in the README. No generated
+      man page is shipped.
 
 ## Phase 6 — Testing, Docs & Release Hardening
-- [ ] End-to-end integration tests: run the built binary against real sample
-      Rust projects (small/medium/large) and snapshot the dashboard output
-- [ ] Performance regression test guarding the <100ms parse budget
-- [ ] Document `~/.tpt/vitals/cve.db` cache location, update cadence, and
+- [x] End-to-end integration tests: run the built binary against real sample
+      Rust projects (small/medium/large) and snapshot the dashboard output —
+      `tests/cli.rs`, with `tests/snapshots/check-small.txt`. Each test seeds its own
+      advisory cache, so nothing touches the network or `~/.tpt`.
+- [x] Performance regression test guarding the <100ms parse budget — `parse_budget`
+      now runs in the normal test suite (it was `#[ignore]`d)
+- [x] Document `~/.tpt/vitals/cve.db` cache location, update cadence, and
       air-gapped usage in README
-- [ ] Cut `v0.1.0`, publish to crates.io, tag release
+- [ ] Cut `v0.1.0`, publish to crates.io, tag release — **not done.** Publishing and
+      tagging are outward-facing and cannot be undone, so they wait for an explicit go-ahead.
 - [ ] Target release milestone: Q4 2026 (per spec.txt header)
