@@ -46,6 +46,12 @@ enum Command {
         #[arg(long, value_name = "LIST", value_delimiter = ',')]
         dev_allow: Vec<String>,
 
+        /// A license one crate may use in addition to the policy, as `CRATE=LICENSE`
+        /// (repeatable). It applies to that crate only, as a recorded exception does,
+        /// for example `webpki-roots=CDLA-Permissive-2.0`.
+        #[arg(long, value_name = "CRATE=LICENSE")]
+        exception: Vec<String>,
+
         /// Exit non-zero on license violations or vulnerabilities, and print a
         /// tab-separated summary of each finding to stdout.
         #[arg(long)]
@@ -103,6 +109,7 @@ fn run() -> Result<ExitCode, Error> {
             path,
             enforce_license,
             dev_allow,
+            exception,
             ci_mode,
             max_db_age_days,
         } => {
@@ -118,7 +125,8 @@ fn run() -> Result<ExitCode, Error> {
             }
 
             let policy = (!enforce_license.is_empty()).then_some(enforce_license.as_slice());
-            let licenses = license::check(&graph, policy, &dev_allow);
+            let exceptions = parse_exceptions(&exception)?;
+            let licenses = license::check_with(&graph, policy, &dev_allow, &exceptions);
             print_license_summary(&licenses, &enforce_license);
 
             if !db_path.exists() {
@@ -188,6 +196,19 @@ fn run() -> Result<ExitCode, Error> {
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+/// Splits each `CRATE=LICENSE` argument. Both halves must be non-empty.
+fn parse_exceptions(items: &[String]) -> Result<Vec<(String, String)>, String> {
+    items
+        .iter()
+        .map(|item| {
+            item.split_once('=')
+                .filter(|(krate, license)| !krate.is_empty() && !license.is_empty())
+                .map(|(krate, license)| (krate.to_owned(), license.to_owned()))
+                .ok_or_else(|| format!("--exception {item:?} must be CRATE=LICENSE"))
+        })
+        .collect()
 }
 
 fn print_license_summary(report: &license::LicenseReport, policy: &[String]) {

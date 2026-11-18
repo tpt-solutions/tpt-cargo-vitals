@@ -199,11 +199,25 @@ impl LicenseReport {
 /// A dev-only dependency (see [`Package::dev_only`]) may also use the identifiers in
 /// `dev_allowed`, since no build ships it. The policy uses this for `Apache-2.0`
 /// alone, which is allowed in dev-dependencies only. Shipped dependencies never get
-/// the dev allowance.
+/// the dev allowance. The CLI always passes exceptions, so this form is for tests.
+#[cfg(test)]
 pub fn check(
     graph: &DependencyGraph,
     allowed: Option<&[String]>,
     dev_allowed: &[String],
+) -> LicenseReport {
+    check_with(graph, allowed, dev_allowed, &[])
+}
+
+/// [`check`] with per-crate exceptions. Each `(crate, license)` pair lets that one
+/// crate use `license` in addition to the policy, and no other crate. The policy
+/// records such exceptions with a reason and a scope, for example `webpki-roots`
+/// with `CDLA-Permissive-2.0`.
+pub fn check_with(
+    graph: &DependencyGraph,
+    allowed: Option<&[String]>,
+    dev_allowed: &[String],
+    exceptions: &[(String, String)],
 ) -> LicenseReport {
     let mut report = LicenseReport::default();
 
@@ -230,11 +244,17 @@ pub fn check(
         }
 
         if let Some(allowed) = allowed {
-            let extra: Vec<String> = if pkg.dev_only {
+            let mut extra: Vec<String> = if pkg.dev_only {
                 allowed.iter().chain(dev_allowed).cloned().collect()
             } else {
                 allowed.to_vec()
             };
+            extra.extend(
+                exceptions
+                    .iter()
+                    .filter(|(name, _)| *name == pkg.name)
+                    .map(|(_, license)| license.clone()),
+            );
             let passes = expr.as_ref().is_some_and(|expr| expr.satisfied_by(&extra));
             if !passes {
                 let license = pkg.license.as_deref().unwrap_or("none");
@@ -403,6 +423,23 @@ mod tests {
         assert_eq!(report.checked, 1); // lic-wrap only
         assert_eq!(report.inactive, 1); // lic-gpl
         assert!(report.violations.is_empty(), "{:?}", report.violations);
+    }
+
+    #[test]
+    fn exception_lets_one_crate_use_its_license_and_no_other() {
+        let graph = DependencyGraph::load(&fixture()).unwrap();
+        let exceptions = [("lic-apache".to_owned(), "Apache-2.0".to_owned())];
+        let report = check_with(&graph, Some(&allow(&["MIT"])), &[], &exceptions);
+        let failing: Vec<&str> = report
+            .violations
+            .iter()
+            .map(|(label, _)| label.as_str())
+            .collect();
+        // lic-apache is excepted; the GPL crate and the undeclared one still fail.
+        assert_eq!(
+            failing,
+            ["lic-and 0.1.0", "lic-gpl 0.1.0", "lic-none 0.1.0"]
+        );
     }
 
     fn inactive_fixture() -> PathBuf {
